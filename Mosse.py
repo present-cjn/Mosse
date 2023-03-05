@@ -21,16 +21,6 @@ def xywh2xyxy(x):
     return y
 
 
-def yxwh2xyxy(x):
-    # Convert 1x4 boxes from [y, x, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
-    y = [x[1],
-         x[0],
-         x[1] + x[3],
-         x[0] + x[2]]
-
-    return y
-
-
 def window_func_2d(height, width):
     win_col = np.hanning(width)
     win_row = np.hanning(height)
@@ -53,20 +43,17 @@ def pre_process(img):
     return img
 
 
-def xywh2xyxy(x):
-    # Convert 1x4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
-    # 这里的x方向是纵向，y是横向
-    y = [x[0] - int(x[3] / 2),
-         x[1] - int(x[2] / 2),
-         x[0] + int(x[3] / 2),
-         x[1] + int(x[2] / 2)]
+def xyxy_scale(x, scale: float):
+    cx = (x[0] + x[2]) / 2
+    cy = (x[1] + x[3]) / 2
+    w = (x[2] - x[0]) * scale
+    h = (x[3] - x[1]) * scale
+    y = [cx - w / 2,
+         cy - h / 2,
+         cx + w / 2,
+         cy + h / 2]
 
     return y
-
-
-def xyxy_scale(x, scale: float):
-    # ToDo 实现xyxy的缩放功能
-    pass
 
 
 def get_gauss_response(h, w, sigma):
@@ -76,7 +63,6 @@ def get_gauss_response(h, w, sigma):
     :param sigma:方差
     :return: response
     """
-    # 这里的xy和numpy的相反，横向x，纵向y
     xx, yy = np.meshgrid(np.arange(w), np.arange(h))
     cx = w/2
     cy = h/2
@@ -102,11 +88,11 @@ class Mosse:
         first_frame = first_frame.astype(np.float32)
         # 手动标记第一帧的目标
         box = list(cv2.selectROI('demo', first_frame/255.0, False, False))
-        box = yxwh2xyxy(box)
+        box = xywh2xyxy(box)
 
         # 获取第一帧的目标图f和其对应的高斯响应图g
-        f = first_frame[box[0]:box[2], box[1]:box[3]]
-        g = self.get_gauss_response(f.shape[0], f.shape[1])
+        f = first_frame[box[1]:box[3], box[0]:box[2]]
+        g = get_gauss_response(f.shape[0], f.shape[1], self.sigma)
 
         # 获取第一帧框选图片的滤波器所需的分子分母
         A, B = self.get_init_ab(f, g)
@@ -116,7 +102,27 @@ class Mosse:
             frame = cv2.imread(frame_path, 0)
             frame = frame.astype(np.float32)
             H = A / B
-            # Todo 暂时还未完成
+            # 选取上一帧位置附近1.2倍范围进行目标跟踪
+            box_scale = xyxy_scale(box, 1.2)
+            f = cv2.resize(frame[box_scale[1]:box_scale[3], box_scale[0]:box_scale[2]], f.shape[0], f.shape[1])
+            F = np.fft.fft2(pre_process(f))
+            G = F * H
+            g_max = np.max(G)
+            max_index = np.where(G == g_max)
+            cx = np.mean(max_index[1]) + 1
+            cy = np.mean(max_index[0]) + 1
+
+            dx = cx - (f.shape[1] + 1) / 2
+            dy = cy - (f.shape[0] + 1) / 2
+
+            box[0] += dx
+            box[1] += dy
+            box[2] += dx
+            box[3] += dy
+
+            new_A, new_B = self.get_ab(f, g)
+            A = (1 - self.lr) * A + self.lr * new_A
+            B = (1 - self.lr) * B + self.lr * new_B
 
     def get_ab(self, f, g):
         F = np.fft.fft2(pre_process(f))
@@ -137,7 +143,7 @@ class Mosse:
         if self.rotate_flag:
             for _ in range(128):
                 n_f = f  # 这里加入数据变换函数
-                new_A, new_B = self.get_AB(n_f, g)
+                new_A, new_B = self.get_ab(n_f, g)
                 A = A + new_A
                 B = B + new_B
 
